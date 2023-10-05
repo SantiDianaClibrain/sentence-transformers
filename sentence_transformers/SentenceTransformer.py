@@ -20,6 +20,7 @@ import math
 import queue
 import tempfile
 from distutils.dir_util import copy_tree
+from tqdm import tqdm
 
 from . import __MODEL_HUB_ORGANIZATION__
 from .evaluation import SentenceEvaluator
@@ -682,66 +683,79 @@ class SentenceTransformer(nn.Sequential):
         num_train_objectives = len(train_objectives)
 
         skip_scheduler = False
+        
         for epoch in trange(epochs, desc="Epoch", disable=not show_progress_bar):
-            training_steps = 0
+            cumulative_loss = 0  # Initialize cumulative loss
+            
+            with tqdm(total=steps_per_epoch, desc=f"Epoch {epoch}", leave=False) as pbar:
+                training_steps = 0
 
-            for loss_model in loss_models:
-                loss_model.zero_grad()
-                loss_model.train()
+                for loss_model in loss_models:
+                    loss_model.zero_grad()
+                    loss_model.train()
 
-            for _ in trange(steps_per_epoch, desc="Iteration", smoothing=0.05, disable=not show_progress_bar):
-                for train_idx in range(num_train_objectives):
-                    loss_model = loss_models[train_idx]
-                    optimizer = optimizers[train_idx]
-                    scheduler = schedulers[train_idx]
-                    data_iterator = data_iterators[train_idx]
+                for _ in range(steps_per_epoch):
+                    for train_idx in range(num_train_objectives):
+                        loss_model = loss_models[train_idx]
+                        optimizer = optimizers[train_idx]
+                        scheduler = schedulers[train_idx]
+                        data_iterator = data_iterators[train_idx]
 
-                    try:
-                        data = next(data_iterator)
-                    except StopIteration:
-                        data_iterator = iter(dataloaders[train_idx])
-                        data_iterators[train_idx] = data_iterator
-                        data = next(data_iterator)
+                        try:
+                            data = next(data_iterator)
+                        except StopIteration:
+                            data_iterator = iter(dataloaders[train_idx])
+                            data_iterators[train_idx] = data_iterator
+                            data = next(data_iterator)
 
-                    features, labels = data
-                    labels = labels.to(self._target_device)
-                    features = list(map(lambda batch: batch_to_device(batch, self._target_device), features))
+                        features, labels = data
+                        labels = labels.to(self._target_device)
+                        features = list(map(lambda batch: batch_to_device(batch, self._target_device), features))
 
-                    if use_amp:
-                        with autocast():
+                        if use_amp:
+                            with autocast():
+                                loss_value = loss_model(features, labels)
+                            cumulative_loss += loss_value.item()
+                            scale_before_step = scaler.get_scale()
+                            scaler.scale(loss_value).backward()
+                            scaler.unscale_(optimizer)
+                            torch.nn.utils.clip_grad_norm_(loss_model.parameters(), max_grad_norm)
+                            scaler.step(optimizer)
+                            scaler.update()
+
+                            skip_scheduler = scaler.get_scale() != scale_before_step
+                        else:
                             loss_value = loss_model(features, labels)
+                            cumulative_loss += loss_value.item()
+                            loss_value.backward()
+                            torch.nn.utils.clip_grad_norm_(loss_model.parameters(), max_grad_norm)
+                            optimizer.step()
 
-                        scale_before_step = scaler.get_scale()
-                        scaler.scale(loss_value).backward()
-                        scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(loss_model.parameters(), max_grad_norm)
-                        scaler.step(optimizer)
-                        scaler.update()
+                        optimizer.zero_grad()
 
-                        skip_scheduler = scaler.get_scale() != scale_before_step
-                    else:
-                        loss_value = loss_model(features, labels)
-                        loss_value.backward()
-                        torch.nn.utils.clip_grad_norm_(loss_model.parameters(), max_grad_norm)
-                        optimizer.step()
+                        if not skip_scheduler:
+                            scheduler.step()
 
-                    optimizer.zero_grad()
+                        pbar.update()
+                        pbar.set_postfix(
+                            {"loss": loss_value.item(),
+                            "step": training_steps})
 
-                    if not skip_scheduler:
-                        scheduler.step()
+                        training_steps += 1
+                        global_step += 1
 
-                training_steps += 1
-                global_step += 1
+                    if evaluation_steps > 0 and training_steps % evaluation_steps == 0:
+                        self._eval_during_training(evaluator, output_path, save_best_model, epoch, training_steps, callback)
 
-                if evaluation_steps > 0 and training_steps % evaluation_steps == 0:
-                    self._eval_during_training(evaluator, output_path, save_best_model, epoch, training_steps, callback)
+                        for loss_model in loss_models:
+                            loss_model.zero_grad()
+                            loss_model.train()
 
-                    for loss_model in loss_models:
-                        loss_model.zero_grad()
-                        loss_model.train()
-
-                if checkpoint_path is not None and checkpoint_save_steps is not None and checkpoint_save_steps > 0 and global_step % checkpoint_save_steps == 0:
-                    self._save_checkpoint(checkpoint_path, checkpoint_save_total_limit, global_step)
+                    if checkpoint_path is not None and checkpoint_save_steps is not None and checkpoint_save_steps > 0 and global_step % checkpoint_save_steps == 0:
+                        self._save_checkpoint(checkpoint_path, checkpoint_save_total_limit, global_step)
+            
+            mean_loss = cumulative_loss / training_steps if training_steps > 0 else 0
+            print(f'Mean Loss for Epoch {epoch}: {mean_loss:.4f}')
 
 
             self._eval_during_training(evaluator, output_path, save_best_model, epoch, -1, callback)
