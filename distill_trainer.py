@@ -80,9 +80,19 @@ train_loss = MSELoss(model=student_model)
 
 # Train the model
 output_path = "model"
+configuration ={
+    'lr': 2e-5,
+    'eps': 1e-6,
+    'Epochs':num_epochs,
+    'Max sequence length': max_seq_length,
+    'Batch size':train_batch_size,
+    'Teacher model': teacher_model_name,
+    'Student model': student_model_name
+}
 student_model.fit(train_objectives=[(train_dataloader, train_loss)],
           epochs=num_epochs,
           output_path=output_path,
-          optimizer_params= {'lr': 2e-5, 'eps': 1e-6}
+          optimizer_params= {'lr': 2e-5, 'eps': 1e-6},
+          configuration=configuration
           )
 

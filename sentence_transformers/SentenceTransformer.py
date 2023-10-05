@@ -21,6 +21,7 @@ import queue
 import tempfile
 from distutils.dir_util import copy_tree
 from tqdm import tqdm
+import wandb
 
 from . import __MODEL_HUB_ORGANIZATION__
 from .evaluation import SentenceEvaluator
@@ -582,6 +583,7 @@ class SentenceTransformer(nn.Sequential):
             warmup_steps: int = 10000,
             optimizer_class: Type[Optimizer] = torch.optim.AdamW,
             optimizer_params : Dict[str, object]= {'lr': 2e-5},
+            configuration: dict = {'lr': 2e-5, 'epochs':1},
             weight_decay: float = 0.01,
             evaluation_steps: int = 0,
             output_path: str = None,
@@ -622,6 +624,8 @@ class SentenceTransformer(nn.Sequential):
         :param checkpoint_save_steps: Will save a checkpoint after so many steps
         :param checkpoint_save_total_limit: Total number of checkpoints to store
         """
+
+        wandb.init(project='Distillation', name='run-name', config=configuration)
 
         ##Add info to model card
         #info_loss_functions = "\n".join(["- {} with {} training examples".format(str(loss), len(dataloader)) for dataloader, loss in train_objectives])
@@ -715,6 +719,7 @@ class SentenceTransformer(nn.Sequential):
                         if use_amp:
                             with autocast():
                                 loss_value = loss_model(features, labels)
+                            wandb.log({'loss': loss_value.item()}, step=global_step)
                             cumulative_loss += loss_value.item()
                             scale_before_step = scaler.get_scale()
                             scaler.scale(loss_value).backward()
@@ -726,6 +731,7 @@ class SentenceTransformer(nn.Sequential):
                             skip_scheduler = scaler.get_scale() != scale_before_step
                         else:
                             loss_value = loss_model(features, labels)
+                            wandb.log({'loss': loss_value.item()}, step=global_step)
                             cumulative_loss += loss_value.item()
                             loss_value.backward()
                             torch.nn.utils.clip_grad_norm_(loss_model.parameters(), max_grad_norm)
