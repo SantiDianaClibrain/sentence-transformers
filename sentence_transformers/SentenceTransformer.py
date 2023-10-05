@@ -625,7 +625,7 @@ class SentenceTransformer(nn.Sequential):
         :param checkpoint_save_total_limit: Total number of checkpoints to store
         """
 
-        wandb.init(project='Distillation', name='run-name', config=configuration)
+        wandb.init(project='Distillation', name=configuration.get('Runtime name'), config=configuration)
 
         ##Add info to model card
         #info_loss_functions = "\n".join(["- {} with {} training examples".format(str(loss), len(dataloader)) for dataloader, loss in train_objectives])
